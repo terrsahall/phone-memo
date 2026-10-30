@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>電話メモ</title>
+<style>
+  body { margin:0; font-family:-apple-system,sans-serif; background:#111; color:#eee; }
+  #top { padding:12px; display:flex; gap:10px; }
+  button { flex:1; font-size:22px; padding:18px; border:0; border-radius:12px; }
+  #btn { background:#2e7d32; color:#fff; }
+  #btn.on { background:#c62828; }
+  #setBtn { flex:0 0 70px; font-size:14px; background:#444; color:#ddd; }
+  #status { padding:0 14px; font-size:14px; color:#aaa; }
+  #now { margin:10px 12px; padding:12px; min-height:60px; background:#222; border-radius:10px; font-size:20px; color:#ffd54f; }
+  #log { padding:0 14px 40px; font-size:17px; line-height:1.6; }
+  .ng { color:#ef9a9a; }
+</style>
+</head>
+<body>
+<div id="top">
+  <button id="btn">● 開始</button>
+  <button id="setBtn">設定</button>
+</div>
+<div id="status">停止中</div>
+<div id="now"></div>
+<div id="log"></div>
+<pre id="dbg" style="padding:0 14px 30px;font-size:12px;color:#888;white-space:pre-wrap;"></pre>
+
+<script>
+const DEFAULT_URL = 'https://script.google.com/macros/s/AKfycbzHTxxl878ZeRF61VmBoguyrWoFHm9lcxep2r0TotC-UBGsvPolJAvUkD42uZN3W-k1/exec';
+let url = DEFAULT_URL;
+try { url = localStorage.getItem('memoUrl') || DEFAULT_URL; } catch(e) {}
+
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+const nowEl = document.getElementById('now');
+const logEl = document.getElementById('log');
+
+document.getElementById('setBtn').onclick = () => {
+  const v = prompt('送り先のURL（Apps Scriptの /exec で終わるURL）を貼り付けてください', url);
+  if (v !== null) { url = v.trim(); try { localStorage.setItem('memoUrl', url); } catch(e) {} }
+};
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { statusEl.textContent = 'このブラウザは音声認識に対応していません（Safariで開いてください）'; btn.disabled = true; }
+
+let rec = null, running = false, wakeLock = null;
+
+function addLog(text, ok) {
+  const d = document.createElement('div');
+  const t = new Date().toLocaleTimeString('ja-JP', {hour:'2-digit', minute:'2-digit'});
+  d.textContent = t + '　' + text + (ok ? '' : '（未送信）');
+  if (!ok) d.className = 'ng';
+  logEl.prepend(d);
+}
+
+async function send(text) {
+  // 「あ」「えー」「ん」など、つなぎ言葉だけのものは送らない
+  if (/^[あいうえおんーっ、。！？!?\s]*$/.test(text) || text.replace(/\s/g,'').length <= 1) { mark('無視: ' + text); return; }
+  if (!url) { addLog(text, false); statusEl.textContent = '「設定」で送り先URLを入れてください'; return; }
+  try {
+    await fetch(url, { method:'POST', mode:'no-cors', body:text });
+    addLog(text, true);
+  } catch (e) {
+    addLog(text, false);
+  }
+}
+
+// 動作の記録（原因調査用）
+const dbg = [];
+function mark(s) {
+  dbg.unshift(new Date().toLocaleTimeString('ja-JP') + ' ' + s);
+  if (dbg.length > 8) dbg.pop();
+  document.getElementById('dbg').textContent = dbg.join('\n');
+}
+
+let lastText = '';
+function startRec() {
+  rec = new SR();
+  rec.lang = 'ja-JP';
+  rec.continuous = false;      // iPhone 8 は一言ずつの方が安定
+  rec.interimResults = true;
+  lastText = '';
+  rec.onstart = () => mark('start');
+  rec.onaudiostart = () => mark('マイクON');
+  rec.onspeechstart = () => mark('声を検出');
+  rec.onresult = (e) => {
+    let text = '', fin = false;
+    for (let i = 0; i < e.results.length; i++) {
+      text += e.results[i][0].transcript;
+      if (e.results[i].isFinal) fin = true;
+    }
+    nowEl.textContent = text;
+    lastText = text;
+    if (fin) { mark('確定'); const t = text.trim(); if (t) send(t); lastText = ''; }
+  };
+  rec.onerror = (e) => {
+    mark('エラー ' + e.error);
+    if (e.error === 'service-not-allowed' || e.error === 'not-allowed') {
+      paused = true;
+      statusEl.textContent = '止まりました。画面のどこかをタップすると再開します';
+      document.body.style.background = '#3a2a00';
+    }
+  };
+  rec.onend = () => {
+    mark('end');
+    // 確定しないまま終わった文字も送る
+    if (lastText.trim()) { send(lastText.trim()); lastText = ''; }
+    nowEl.textContent = '';
+    if (running && !paused) setTimeout(() => { try { startRec(); } catch(e) { mark('再開失敗'); paused = true; } }, 200);
+  };
+  rec.start();
+  paused = false;
+  document.body.style.background = '#111';
+  statusEl.textContent = '聞き取り中…';
+}
+
+let paused = false;
+// 止まったとき、画面タップで再開（iPhoneはタップの瞬間でないと開始できない）
+document.addEventListener('click', (ev) => {
+  if (ev.target === btn || ev.target.id === 'setBtn') return;
+  if (running && paused) { try { startRec(); } catch(e) {} }
+});
+
+btn.onclick = () => {
+  if (!running) {
+    running = true; btn.textContent = '■ 停止'; btn.classList.add('on');
+    startRec();  // タップの瞬間にすぐ開始する（先に他の処理を挟まない）
+  } else {
+    running = false; btn.textContent = '● 開始'; btn.classList.remove('on');
+    try { rec && rec.stop(); } catch(e) {}
+    try { wakeLock && wakeLock.release(); } catch(e) {}
+    nowEl.textContent = ''; statusEl.textContent = '停止中';
+  }
+};
+</script>
+</body>
+</html>
